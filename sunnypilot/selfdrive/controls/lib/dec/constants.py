@@ -15,3 +15,12 @@ class WMACConstants:
   SLOWNESS_WINDOW_SIZE = 10  # Stable slowness detection
   SLOWNESS_PROB = 0.55  # Clear threshold for slowness
   SLOWNESS_CRUISE_OFFSET = 1.025  # Conservative cruise speed offset
+
+  URGENCY_CRITICAL_BOOST_MAX = 1.5
+
+  STOP_HOLD_ARM_FRAMES = 10
+  STOP_HOLD_RELEASE_TRAJ_X = 60.0
+  STOP_HOLD_RELEASE_TRAJ_FRAMES = 20
+
+  LOW_SPEED_THRESHOLD_KPH = 30.0
+  LOW_SPEED_MIN_MODE_DURATION = 20

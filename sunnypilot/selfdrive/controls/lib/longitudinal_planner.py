@@ -53,19 +53,26 @@ class LongitudinalPlannerSP:
     return experimental_mode and self.dec.mode() == "blended"
 
   def get_accel_clip(self, v_ego: float) -> list[float] | None:
-    if not self.accel_controller.is_enabled():
+    stop_hold = self.dec.force_stop_hold()
+
+    if not self.accel_controller.is_enabled() and not stop_hold:
       return None
 
-    a_max = self.accel_controller.get_max_accel(v_ego)
+    if self.accel_controller.is_enabled():
+      a_max = self.accel_controller.get_max_accel(v_ego)
+      ceiling = self.radar_distance.get_accel_ceiling(v_ego) if self.radar_distance.is_enabled() else None
+      if ceiling is not None:
+        a_max = min(a_max, ceiling)
+    else:
+      a_max = 0.0
 
-    ceiling = None
-    if self.radar_distance.is_enabled():
-      ceiling = self.radar_distance.get_accel_ceiling(v_ego)
-
-    if ceiling is not None:
-      a_max = min(a_max, ceiling)
+    if stop_hold:
+      a_max = min(a_max, 0.0)
 
     return [ACCEL_MIN, max(ACCEL_MIN, a_max)]
+
+  def force_stop_override(self) -> bool:
+    return self.dec.force_stop_hold()
 
   def get_cruise_min_accel(self, v_ego: float) -> float | None:
     if self.accel_controller.is_enabled():

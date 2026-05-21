@@ -85,8 +85,18 @@ class ModeTransitionManager:
     self.min_mode_duration = 10
     self.mode_duration = 0
     self.emergency_override = False
+    self.pinned_mode: ModeType | None = None
+
+  def pin(self, mode: ModeType | None) -> None:
+    self.pinned_mode = mode
+    if mode is not None:
+      self.current_mode = mode
 
   def request_mode(self, mode: ModeType, confidence: float = 1.0, emergency: bool = False):
+    if self.pinned_mode is not None:
+      self.current_mode = self.pinned_mode
+      return
+
     # Emergency override for critical situations (stops, collisions)
     if emergency:
       self.emergency_override = True
@@ -141,6 +151,7 @@ class DynamicExperimentalController:
     self._urgency = 0.0
 
     self._mode_manager = ModeTransitionManager()
+    self._base_min_mode_duration = self._mode_manager.min_mode_duration
 
     # Smooth filters for stable decision making with faster response for critical scenarios
     self._lead_filter = SmoothKalmanFilter(
@@ -184,6 +195,13 @@ class DynamicExperimentalController:
     self._expected_distance = 0.0
     self._trajectory_valid = False
 
+    self._should_stop_e2e = False
+    self._should_stop_streak = 0
+    self._long_traj_streak = 0
+    self._gas_pressed = False
+    self._stop_hold_active = False
+    self._lead_depart_active = False
+
   def _read_params(self) -> None:
     if self._frame % int(1. / DT_MDL) == 0:
       self._enabled = self._params.get_bool("DynamicExperimentalControl")
@@ -197,6 +215,9 @@ class DynamicExperimentalController:
   def active(self) -> bool:
     return self._active
 
+  def force_stop_hold(self) -> bool:
+    return self._active and self._stop_hold_active
+
   def set_mpc_fcw_crash_cnt(self) -> None:
     """Set MPC FCW crash count"""
     self._mpc_fcw_crash_cnt = self._mpc.crash_cnt
@@ -209,17 +230,24 @@ class DynamicExperimentalController:
     self._v_ego_kph = car_state.vEgo * 3.6
     self._v_cruise_kph = car_state.vCruise
     self._has_standstill = car_state.standstill
+    self._gas_pressed = bool(car_state.gasPressed)
+    self._should_stop_e2e = bool(md.action.shouldStop)
 
-    # standstill detection
     if self._has_standstill:
       self._standstill_count = min(20, self._standstill_count + 1)
     else:
       self._standstill_count = max(0, self._standstill_count - 1)
 
-    # Lead detection
     self._lead_filter.add_data(float(lead_one.status))
     lead_value = self._lead_filter.get_value() or 0.0
     self._has_lead_filtered = lead_value > WMACConstants.LEAD_PROB
+
+    self._lead_depart_active = (
+      self._has_lead_filtered and
+      lead_one.status and
+      lead_one.dRel > 0 and
+      lead_one.vLead > 0.5
+    )
 
     # MPC FCW detection
     fcw_filtered_value = self._mpc_fcw_filter.get_value() or 0.0
@@ -284,10 +312,11 @@ class DynamicExperimentalController:
       # Base urgency on shortage ratio
       urgency = min(1.0, shortage_ratio * 2.0)
 
-      # Increase urgency for very short trajectories (imminent stops)
       critical_distance = expected_distance * 0.3
-      if endpoint_x < critical_distance:
-        urgency = min(1.0, urgency * 2.0)
+      if endpoint_x < critical_distance and critical_distance > 0:
+        ratio = 1.0 - (endpoint_x / critical_distance)
+        boost = 1.0 + ratio * (WMACConstants.URGENCY_CRITICAL_BOOST_MAX - 1.0)
+        urgency = min(1.0, urgency * boost)
 
       # Speed-based urgency adjustment
       if self._v_ego_kph > 25.0:
@@ -371,6 +400,38 @@ class DynamicExperimentalController:
     # Default: ACC
     self._mode_manager.request_mode('acc', confidence=0.7)
 
+  def _update_stop_hold(self) -> None:
+    mode_blended = self._mode_manager.get_mode() == 'blended'
+
+    if mode_blended and self._has_standstill and self._should_stop_e2e:
+      self._should_stop_streak = min(60, self._should_stop_streak + 1)
+    else:
+      self._should_stop_streak = max(0, self._should_stop_streak - 1)
+
+    if self._trajectory_valid and self._endpoint_x > WMACConstants.STOP_HOLD_RELEASE_TRAJ_X:
+      self._long_traj_streak = min(60, self._long_traj_streak + 1)
+    else:
+      self._long_traj_streak = 0
+
+    if not self._stop_hold_active and mode_blended and self._has_standstill and \
+        not self._has_lead_filtered and not self._gas_pressed and \
+        self._should_stop_streak >= WMACConstants.STOP_HOLD_ARM_FRAMES:
+      self._stop_hold_active = True
+
+    if self._stop_hold_active:
+      released = (self._gas_pressed or self._has_mpc_fcw or
+                  self._lead_depart_active or not self._has_standstill or
+                  self._long_traj_streak >= WMACConstants.STOP_HOLD_RELEASE_TRAJ_FRAMES)
+      if released:
+        self._stop_hold_active = False
+
+    self._mode_manager.pin('blended' if self._stop_hold_active else None)
+
+    if self._v_ego_kph < WMACConstants.LOW_SPEED_THRESHOLD_KPH:
+      self._mode_manager.min_mode_duration = WMACConstants.LOW_SPEED_MIN_MODE_DURATION
+    else:
+      self._mode_manager.min_mode_duration = self._base_min_mode_duration
+
   def update(self, sm: messaging.SubMaster) -> None:
     self._read_params()
 
@@ -382,6 +443,8 @@ class DynamicExperimentalController:
       self._radarless_mode()
     else:
       self._radar_mode()
+
+    self._update_stop_hold()
 
     self._mode_manager.update()
     self._active = sm['selfdriveState'].experimentalMode and self._enabled

@@ -171,6 +171,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 
+    if self.force_stop_override():
+      self.output_should_stop = True
+
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
