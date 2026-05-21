@@ -34,7 +34,7 @@ LAT_ACCEL_REQUEST_BUFFER_SECONDS = 1.0
 FRICTION_THRESHOLD = 0.3
 VERSION = 0
 
-FRICTION_FLOOR = 0.15
+FRICTION_FLOOR = 0.20
 TURN_C = 0.005
 EXIT_C = 0.0015
 TURN_EXIT_DECAY_FRAMES = 30
@@ -110,7 +110,8 @@ class LatControlTorque(LatControl):
       # latAccelOffset corrects roll compensation bias from device roll misalignment relative to car roll
       ff -= self.torque_params.latAccelOffset
       # TODO jerk is weighted by lat_delay for legacy reasons, but should be made independent of it
-      ff += get_friction(error, max(lateral_accel_deadzone, self.friction_floor), FRICTION_THRESHOLD, self.torque_params)
+      friction_floor = self.friction_floor if abs(desired_curvature) < EXIT_C else 0.0
+      ff += get_friction(error, max(lateral_accel_deadzone, friction_floor), FRICTION_THRESHOLD, self.torque_params)
 
       if self.turn_exit_decay:
         abs_dc = abs(desired_curvature)
