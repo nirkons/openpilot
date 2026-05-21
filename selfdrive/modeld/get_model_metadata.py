@@ -38,7 +38,8 @@ def get_metadata_value_by_name(model: dict[str, Any], name: str) -> str | Any:
 def make_metadata_dict(model_path):
   model = MetadataOnnxPBParser(model_path).parse()
   output_slices = get_metadata_value_by_name(model, 'output_slices')
-  assert output_slices is not None, 'output_slices not found in metadata'
+  if output_slices is None:
+    return None
   return {
     'model_checkpoint': get_metadata_value_by_name(model, 'model_checkpoint'),
     'output_slices': pickle.loads(codecs.decode(output_slices.encode(), "base64")),
@@ -50,6 +51,10 @@ def make_metadata_dict(model_path):
 if __name__ == "__main__":
   model_path = pathlib.Path(sys.argv[1])
   metadata_path = model_path.parent / (model_path.stem + '_metadata.pkl')
-  with open(metadata_path, 'wb') as f:
-    pickle.dump(make_metadata_dict(model_path), f)
-  print(f'saved metadata to {metadata_path}')
+  metadata = make_metadata_dict(model_path)
+  if metadata is not None:
+    with open(metadata_path, 'wb') as f:
+      pickle.dump(metadata, f)
+    print(f'saved metadata to {metadata_path}')
+  else:
+    print(f'skipped {model_path.name}: output_slices not found in metadata')

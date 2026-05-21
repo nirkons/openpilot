@@ -32,6 +32,9 @@ OPTIONAL_OUTPUT_KEYS = frozenset({
 def validate_model_outputs(metadata_paths: list[Path]) -> None:
   combined_keys: set[str] = set()
   for path in metadata_paths:
+    if path.stat().st_size == 0:
+      print(f"skipping empty metadata: {path}")
+      continue
     with open(path, "rb") as f:
       metadata = pickle.load(f)
     combined_keys.update(metadata.get("output_slices", {}).keys())
