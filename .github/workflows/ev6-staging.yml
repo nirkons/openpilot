@@ -1,0 +1,208 @@
+name: EV6 synced sunnypilot staging
+
+# Runs in nirkons/sunnypilot after you enable GitHub Actions on the fork.
+# Uses GitHub-hosted standard runners; no secrets beyond GITHUB_TOKEN.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 2,8,14,20 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ev6-staging-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout automation scripts from this fork
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            ev6
+            .github/workflows/ev6-staging.yml
+
+      - name: Test strict source patch
+        run: python3 -m unittest discover -s ev6 -p 'test_*.py' -v
+
+      - name: Detect new official staging release
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGING_SHA="$(git ls-remote https://github.com/sunnypilot/sunnypilot.git refs/heads/staging | awk '{print $1}')"
+          if [[ ! "$STAGING_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo 'Cannot identify official staging commit' >&2
+            exit 1
+          fi
+          echo "staging_sha=$STAGING_SHA" >> "$GITHUB_OUTPUT"
+          echo "Official staging: $STAGING_SHA"
+
+          # A published release contains its official parent staging SHA.
+          # We don't need to download or build anything when it hasn't changed.
+          META_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/ev6-staging/.ev6-build.json"
+          if curl --silent --show-error --fail --location "$META_URL" -o "$RUNNER_TEMP/current-ev6-build.json"; then
+            CURRENT_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["upstream_staging_sha"])' "$RUNNER_TEMP/current-ev6-build.json")"
+          else
+            CURRENT_SHA=''
+          fi
+          if [[ "$CURRENT_SHA" == "$STAGING_SHA" ]]; then
+            echo 'Already published for this staging snapshot; skipping.'
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'New staging release requires a build.'
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch exact official staging snapshot
+        if: steps.detect.outputs.changed == 'true'
+        id: resolve
+        shell: bash
+        env:
+          STAGING_SHA: ${{ steps.detect.outputs.staging_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/prebuilt"
+          git -C "$RUNNER_TEMP/prebuilt" init --quiet
+          git -C "$RUNNER_TEMP/prebuilt" remote add upstream https://github.com/sunnypilot/sunnypilot.git
+          git -C "$RUNNER_TEMP/prebuilt" fetch --quiet --no-tags --depth=1 --filter=blob:none upstream "$STAGING_SHA"
+          git -C "$RUNNER_TEMP/prebuilt" checkout --quiet -B staging FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/prebuilt" rev-parse HEAD)" = "$STAGING_SHA"
+          test -f "$RUNNER_TEMP/prebuilt/prebuilt"
+          test -f "$RUNNER_TEMP/prebuilt/panda/board/obj/panda_h7.bin.signed"
+
+          SOURCE_SHA="$(git -C "$RUNNER_TEMP/prebuilt" log -1 --format=%B | sed -nE 's/^master commit: ([0-9a-f]{40})$/\1/p' | head -n 1)"
+          if [[ ! "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo 'Official staging commit does not identify its source revision' >&2
+            exit 1
+          fi
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Matching source revision: $SOURCE_SHA"
+          python3 ev6/patch.py stock --root "$RUNNER_TEMP/prebuilt"
+
+      - name: Install ARM firmware build tools
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          python3 -m venv "$RUNNER_TEMP/ev6-venv"
+          "$RUNNER_TEMP/ev6-venv/bin/python" -m pip install --disable-pip-version-check 'scons>=4.6,<5'
+          command -v arm-none-eabi-gcc
+
+      - name: Fetch exact upstream source and pinned Panda / opendbc submodules
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/source"
+          git -C "$RUNNER_TEMP/source" init --quiet
+          git -C "$RUNNER_TEMP/source" remote add upstream https://github.com/sunnypilot/sunnypilot.git
+          GIT_LFS_SKIP_SMUDGE=1 git -C "$RUNNER_TEMP/source" fetch --quiet --no-tags --depth=1 --filter=blob:none upstream "$SOURCE_SHA"
+          GIT_LFS_SKIP_SMUDGE=1 git -C "$RUNNER_TEMP/source" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/source" rev-parse HEAD)" = "$SOURCE_SHA"
+
+          # The upstream .gitmodules still has the former sunnyhaibin/panda
+          # URL, which moved to sunnypilot/panda. Do not alter .gitmodules.
+          git config --global url.https://github.com/sunnypilot/panda.git.insteadOf https://github.com/sunnyhaibin/panda.git
+          GIT_LFS_SKIP_SMUDGE=1 git -C "$RUNNER_TEMP/source" submodule update --init panda opendbc_repo
+
+          python3 ev6/patch.py stock --root "$RUNNER_TEMP/source"
+          python3 ev6/patch.py apply --root "$RUNNER_TEMP/source"
+
+      - name: Compile matching custom H7 Panda firmware
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd "$RUNNER_TEMP/source/panda"
+            export PYTHONPATH="$RUNNER_TEMP/source/opendbc_repo"
+            "$RUNNER_TEMP/ev6-venv/bin/scons" -j2 board/obj/panda_h7.bin.signed
+          )
+          test -s "$RUNNER_TEMP/source/panda/board/obj/panda_h7.bin.signed"
+          sha256sum "$RUNNER_TEMP/source/panda/board/obj/panda_h7.bin.signed"
+
+      - name: Patch prebuilt and audit exact changes
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        env:
+          STAGING_SHA: ${{ steps.detect.outputs.staging_sha }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/source"
+          OUT="$RUNNER_TEMP/prebuilt"
+
+          python3 ev6/patch.py apply --root "$OUT"
+          python3 ev6/patch.py verify --root "$OUT"
+          python3 ev6/patch.py verify --root "$SRC"
+          cmp "$SRC/opendbc_repo/opendbc/car/hyundai/values.py" "$OUT/opendbc_repo/opendbc/car/hyundai/values.py"
+          cmp "$SRC/opendbc_repo/opendbc/safety/modes/hyundai_canfd.h" "$OUT/opendbc_repo/opendbc/safety/modes/hyundai_canfd.h"
+
+          cp "$SRC/panda/board/obj/panda_h7.bin.signed" "$OUT/panda/board/obj/panda_h7.bin.signed"
+          test -s "$OUT/panda/board/obj/panda_h7.bin.signed"
+          cmp "$SRC/panda/board/obj/panda_h7.bin.signed" "$OUT/panda/board/obj/panda_h7.bin.signed"
+
+          export OUT STAGING_SHA SOURCE_SHA
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+          from datetime import datetime, timezone
+
+          root = pathlib.Path(os.environ['OUT'])
+          modified = set(subprocess.check_output(
+              ['git', '-C', str(root), 'diff', '--name-only'], text=True).splitlines())
+          expected = {
+              'opendbc_repo/opendbc/car/hyundai/values.py',
+              'opendbc_repo/opendbc/safety/modes/hyundai_canfd.h',
+              'panda/board/obj/panda_h7.bin.signed',
+          }
+          if modified != expected:
+              raise SystemExit(f'Unexpected changes to prebuilt: {sorted(modified)}')
+          firmware = root / 'panda/board/obj/panda_h7.bin.signed'
+          manifest = {
+              'upstream': 'sunnypilot/sunnypilot',
+              'upstream_staging_sha': os.environ['STAGING_SHA'],
+              'upstream_source_sha': os.environ['SOURCE_SHA'],
+              'steering_limits': {'max': 384, 'up': 3, 'down': 7},
+              'panda_h7_sha256': hashlib.sha256(firmware.read_bytes()).hexdigest(),
+              'generated_at_utc': datetime.now(timezone.utc).isoformat(),
+          }
+          (root / '.ev6-build.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - name: Publish installable ev6-staging branch to this fork
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          STAGING_SHA: ${{ steps.detect.outputs.staging_sha }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/prebuilt"
+          git -C "$OUT" config user.name 'github-actions[bot]'
+          git -C "$OUT" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Every published branch snapshot is self-contained, just like
+          # upstream's generated staging branch.
+          git -C "$OUT" checkout --quiet --orphan ev6-staging
+          git -C "$OUT" add -A
+          git -C "$OUT" commit -m "EV6 384/3/7 on sunnypilot staging ${STAGING_SHA:0:7} (source ${SOURCE_SHA:0:7})"
+          git -C "$OUT" -c http.version=HTTP/1.1 push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:refs/heads/ev6-staging
+          echo "Published https://github.com/${GITHUB_REPOSITORY}/tree/ev6-staging"
