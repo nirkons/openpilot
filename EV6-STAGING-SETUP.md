@@ -2,7 +2,7 @@
 
 This adds an **automated fork release pipeline** to your own `nirkons/sunnypilot`
 repository. The published build is the official sunnypilot `staging` prebuilt
-plus only the following **two source-file edits**, along with a freshly
+plus the following **two steering source-file edits**, along with a freshly
 compiled Panda H7 firmware that includes the C safety-file edit:
 
 | File | Original CAN-FD | Custom CAN-FD |
@@ -10,7 +10,23 @@ compiled Panda H7 firmware that includes the C safety-file edit:
 | `opendbc_repo/opendbc/car/hyundai/values.py` | 270 / 2 / 3 | **384 / 3 / 7** |
 | `opendbc_repo/opendbc/safety/modes/hyundai_canfd.h` | 270 / 2 / 3 | **384 / 3 / 7** |
 
-The branch additionally includes `.ev6-build.json` for auditing provenance.
+The publisher also adjusts Sunnylink's **Lateral Acceleration Factor step**
+from `0.1` to **`0.001`** in two UI metadata files:
+`openpilot/sunnypilot/sunnylink/settings_ui_src/pages/steering.yaml` and
+`openpilot/sunnypilot/sunnylink/settings_ui.json`. Friction remains at
+`0.01`. This is a UI step-size change only; it does not change steering
+control parameters or initialize a new tuning value.
+
+**Important current Sunnylink frontend limitation:** The separately hosted
+website formats floating values using `toFixed(2)`, and its +/- buttons
+round to two decimals. This fork **cannot** fix its frontend. With a
+`0.001` device schema, the slider may send finer values, but the number
+shown in the Sunnylink website and the +/- buttons can be misleading.
+A frontend PR to `sunnypilot/sunnylink-frontend` is required for reliable
+three-decimal display and button control.
+
+The branch additionally includes `.ev6-build.json` for auditing provenance,
+recording both steering limits and the Sunnylink step override.
 The binary `panda/board/obj/panda_h7.bin.signed` is **rebuilt every time** from
 the exact matching source commit. It is **not** the old 384/4/7 firmware.
 
@@ -55,11 +71,16 @@ commit is unchanged, it exits. If changed, the workflow:
    If upstream changes them or the file structure, **stop**; do not guess.
 4. Applies `384/3/7` to the two source files and compiles H7 Panda firmware
    from the modified safety definition with the pinned toolchain source.
-5. Applies exactly those two edits to the official staging prebuilt and
-   replaces only its `panda_h7.bin.signed` firmware artifact.
-6. Confirms the two edited runtime files match the source files byte-for-byte;
-   audits the three expected release-tree differences; publishes an orphan
+5. Applies exactly those two steering edits and the two guarded Sunnylink
+   schema edits (YAML and compiled JSON) to the official staging prebuilt;
+   replaces its `panda_h7.bin.signed` firmware artifact.
+6. Confirms the two edited steering files match the source files byte-for-byte;
+   audits the five expected release-tree differences; publishes an orphan
    `ev6-staging` snapshot in your own repo.
+
+A change to the Sunnylink precision patch triggers a rebuild even if official
+staging is unchanged. Changes on `master` to the automation scripts or
+workflow trigger an immediate run, in addition to the scheduled checks.
 
 If any step fails (including package incompatibility, changed upstream
 structures, compilation, or lack of GitHub write permissions), the existing
