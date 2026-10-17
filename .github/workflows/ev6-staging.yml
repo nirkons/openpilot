@@ -4,6 +4,12 @@ name: EV6 synced sunnypilot staging
 # Uses GitHub-hosted standard runners; no secrets beyond GITHUB_TOKEN.
 on:
   workflow_dispatch:
+  # Rebuild immediately whenever the personal override implementation changes.
+  push:
+    branches: [master]
+    paths:
+      - 'ev6/**'
+      - '.github/workflows/ev6-staging.yml'
   schedule:
     - cron: '17 2,8,14,20 * * *'
 
@@ -52,8 +58,15 @@ jobs:
           else
             CURRENT_SHA=''
           fi
-          if [[ "$CURRENT_SHA" == "$STAGING_SHA" ]]; then
-            echo 'Already published for this staging snapshot; skipping.'
+          # A settings-only change must also trigger a new build, even if
+          # sunnypilot's upstream staging SHA has not changed.
+          if [[ -f "$RUNNER_TEMP/current-ev6-build.json" ]]; then
+            CURRENT_LAT_ACCEL_STEP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sunnylink_lat_accel_step",""))' "$RUNNER_TEMP/current-ev6-build.json")"
+          else
+            CURRENT_LAT_ACCEL_STEP=''
+          fi
+          if [[ "$CURRENT_SHA" == "$STAGING_SHA" && "$CURRENT_LAT_ACCEL_STEP" == "0.001" ]]; then
+            echo 'Already published for this staging snapshot AND Sunnylink precision patch; skipping.'
             echo 'changed=false' >> "$GITHUB_OUTPUT"
           else
             echo 'New staging release requires a build.'
@@ -85,6 +98,7 @@ jobs:
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "Matching source revision: $SOURCE_SHA"
           python3 ev6/patch.py stock --root "$RUNNER_TEMP/prebuilt"
+          python3 ev6/patch_sunnylink.py stock --root "$RUNNER_TEMP/prebuilt"
 
       - name: Install ARM firmware build tools
         if: steps.detect.outputs.changed == 'true'
@@ -145,6 +159,11 @@ jobs:
 
           python3 ev6/patch.py apply --root "$OUT"
           python3 ev6/patch.py verify --root "$OUT"
+          # Sunnylink consumes the compiled settings_ui.json from the device.
+          # Patch its YAML source too, so both are consistent. This does NOT
+          # modify the independently hosted Sunnylink web frontend.
+          python3 ev6/patch_sunnylink.py apply --root "$OUT"
+          python3 ev6/patch_sunnylink.py verify --root "$OUT"
           python3 ev6/patch.py verify --root "$SRC"
           cmp "$SRC/opendbc_repo/opendbc/car/hyundai/values.py" "$OUT/opendbc_repo/opendbc/car/hyundai/values.py"
           cmp "$SRC/opendbc_repo/opendbc/safety/modes/hyundai_canfd.h" "$OUT/opendbc_repo/opendbc/safety/modes/hyundai_canfd.h"
@@ -169,6 +188,8 @@ jobs:
               'opendbc_repo/opendbc/car/hyundai/values.py',
               'opendbc_repo/opendbc/safety/modes/hyundai_canfd.h',
               'panda/board/obj/panda_h7.bin.signed',
+              'openpilot/sunnypilot/sunnylink/settings_ui_src/pages/steering.yaml',
+              'openpilot/sunnypilot/sunnylink/settings_ui.json',
           }
           if modified != expected:
               raise SystemExit(f'Unexpected changes to prebuilt: {sorted(modified)}')
@@ -178,6 +199,7 @@ jobs:
               'upstream_staging_sha': os.environ['STAGING_SHA'],
               'upstream_source_sha': os.environ['SOURCE_SHA'],
               'steering_limits': {'max': 384, 'up': 3, 'down': 7},
+              'sunnylink_lat_accel_step': 0.001,
               'panda_h7_sha256': hashlib.sha256(firmware.read_bytes()).hexdigest(),
               'generated_at_utc': datetime.now(timezone.utc).isoformat(),
           }
@@ -201,7 +223,7 @@ jobs:
           # upstream's generated staging branch.
           git -C "$OUT" checkout --quiet --orphan ev6-staging
           git -C "$OUT" add -A
-          git -C "$OUT" commit -m "EV6 384/3/7 on sunnypilot staging ${STAGING_SHA:0:7} (source ${SOURCE_SHA:0:7})"
+          git -C "$OUT" commit -m "EV6 384/3/7 + Sunnylink step 0.001 on staging ${STAGING_SHA:0:7} (source ${SOURCE_SHA:0:7})"
           git -C "$OUT" -c http.version=HTTP/1.1 push --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             HEAD:refs/heads/ev6-staging
