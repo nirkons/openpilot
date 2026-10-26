@@ -50,23 +50,25 @@ jobs:
           echo "staging_sha=$STAGING_SHA" >> "$GITHUB_OUTPUT"
           echo "Official staging: $STAGING_SHA"
 
+          # Identifies this fork's own patches: the committed ev6/ tree and this
+          # workflow. Any change to them must also trigger a new build, even if
+          # sunnypilot's upstream staging SHA has not changed.
+          PATCH_HASH="$(git rev-parse HEAD:ev6 HEAD:.github/workflows/ev6-staging.yml | sha256sum | cut -d' ' -f1)"
+          echo "patch_hash=$PATCH_HASH" >> "$GITHUB_OUTPUT"
+          echo "EV6 patch set: $PATCH_HASH"
+
           # A published release contains its official parent staging SHA.
           # We don't need to download or build anything when it hasn't changed.
           META_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/ev6-staging/.ev6-build.json"
           if curl --silent --show-error --fail --location "$META_URL" -o "$RUNNER_TEMP/current-ev6-build.json"; then
             CURRENT_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["upstream_staging_sha"])' "$RUNNER_TEMP/current-ev6-build.json")"
+            CURRENT_PATCH_HASH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("ev6_patch_hash",""))' "$RUNNER_TEMP/current-ev6-build.json")"
           else
             CURRENT_SHA=''
+            CURRENT_PATCH_HASH=''
           fi
-          # A settings-only change must also trigger a new build, even if
-          # sunnypilot's upstream staging SHA has not changed.
-          if [[ -f "$RUNNER_TEMP/current-ev6-build.json" ]]; then
-            CURRENT_LAT_ACCEL_STEP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sunnylink_lat_accel_step",""))' "$RUNNER_TEMP/current-ev6-build.json")"
-          else
-            CURRENT_LAT_ACCEL_STEP=''
-          fi
-          if [[ "$CURRENT_SHA" == "$STAGING_SHA" && "$CURRENT_LAT_ACCEL_STEP" == "0.001" ]]; then
-            echo 'Already published for this staging snapshot AND Sunnylink precision patch; skipping.'
+          if [[ "$CURRENT_SHA" == "$STAGING_SHA" && "$CURRENT_PATCH_HASH" == "$PATCH_HASH" ]]; then
+            echo 'Already published for this staging snapshot AND this EV6 patch set; skipping.'
             echo 'changed=false' >> "$GITHUB_OUTPUT"
           else
             echo 'New staging release requires a build.'
@@ -99,6 +101,7 @@ jobs:
           echo "Matching source revision: $SOURCE_SHA"
           python3 ev6/patch.py stock --root "$RUNNER_TEMP/prebuilt"
           python3 ev6/patch_sunnylink.py stock --root "$RUNNER_TEMP/prebuilt"
+          python3 ev6/patch_torque_card.py stock --root "$RUNNER_TEMP/prebuilt"
 
       - name: Install ARM firmware build tools
         if: steps.detect.outputs.changed == 'true'
@@ -152,6 +155,7 @@ jobs:
         env:
           STAGING_SHA: ${{ steps.detect.outputs.staging_sha }}
           SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          PATCH_HASH: ${{ steps.detect.outputs.patch_hash }}
         run: |
           set -euo pipefail
           SRC="$RUNNER_TEMP/source"
@@ -164,6 +168,9 @@ jobs:
           # modify the independently hosted Sunnylink web frontend.
           python3 ev6/patch_sunnylink.py apply --root "$OUT"
           python3 ev6/patch_sunnylink.py verify --root "$OUT"
+          # comma 4 (mici) settings: adds a "torque" card for on-device tuning.
+          python3 ev6/patch_torque_card.py apply --root "$OUT"
+          python3 ev6/patch_torque_card.py verify --root "$OUT"
           python3 ev6/patch.py verify --root "$SRC"
           cmp "$SRC/opendbc_repo/opendbc/car/hyundai/values.py" "$OUT/opendbc_repo/opendbc/car/hyundai/values.py"
           cmp "$SRC/opendbc_repo/opendbc/safety/modes/hyundai_canfd.h" "$OUT/opendbc_repo/opendbc/safety/modes/hyundai_canfd.h"
@@ -172,7 +179,7 @@ jobs:
           test -s "$OUT/panda/board/obj/panda_h7.bin.signed"
           cmp "$SRC/panda/board/obj/panda_h7.bin.signed" "$OUT/panda/board/obj/panda_h7.bin.signed"
 
-          export OUT STAGING_SHA SOURCE_SHA
+          export OUT STAGING_SHA SOURCE_SHA PATCH_HASH
           python3 - <<'PY'
           import hashlib
           import json
@@ -184,22 +191,33 @@ jobs:
           root = pathlib.Path(os.environ['OUT'])
           modified = set(subprocess.check_output(
               ['git', '-C', str(root), 'diff', '--name-only'], text=True).splitlines())
+          # New files are untracked, so `git diff` alone would never see them.
+          added = set(subprocess.check_output(
+              ['git', '-C', str(root), 'ls-files', '--others', '--exclude-standard'], text=True).splitlines())
           expected = {
               'opendbc_repo/opendbc/car/hyundai/values.py',
               'opendbc_repo/opendbc/safety/modes/hyundai_canfd.h',
               'panda/board/obj/panda_h7.bin.signed',
               'openpilot/sunnypilot/sunnylink/settings_ui_src/pages/steering.yaml',
               'openpilot/sunnypilot/sunnylink/settings_ui.json',
+              'openpilot/selfdrive/ui/sunnypilot/mici/layouts/settings.py',
+          }
+          expected_added = {
+              'openpilot/selfdrive/ui/sunnypilot/mici/layouts/torque_tuning.py',
           }
           if modified != expected:
               raise SystemExit(f'Unexpected changes to prebuilt: {sorted(modified)}')
+          if added != expected_added:
+              raise SystemExit(f'Unexpected new files in prebuilt: {sorted(added)}')
           firmware = root / 'panda/board/obj/panda_h7.bin.signed'
           manifest = {
               'upstream': 'sunnypilot/sunnypilot',
               'upstream_staging_sha': os.environ['STAGING_SHA'],
               'upstream_source_sha': os.environ['SOURCE_SHA'],
+              'ev6_patch_hash': os.environ['PATCH_HASH'],
               'steering_limits': {'max': 384, 'up': 3, 'down': 7},
               'sunnylink_lat_accel_step': 0.001,
+              'mici_torque_card': True,
               'panda_h7_sha256': hashlib.sha256(firmware.read_bytes()).hexdigest(),
               'generated_at_utc': datetime.now(timezone.utc).isoformat(),
           }
@@ -223,7 +241,7 @@ jobs:
           # upstream's generated staging branch.
           git -C "$OUT" checkout --quiet --orphan ev6-staging
           git -C "$OUT" add -A
-          git -C "$OUT" commit -m "EV6 384/3/7 + Sunnylink step 0.001 on staging ${STAGING_SHA:0:7} (source ${SOURCE_SHA:0:7})"
+          git -C "$OUT" commit -m "EV6 384/3/7 + Sunnylink step 0.001 + torque card on staging ${STAGING_SHA:0:7} (source ${SOURCE_SHA:0:7})"
           git -C "$OUT" -c http.version=HTTP/1.1 push --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             HEAD:refs/heads/ev6-staging

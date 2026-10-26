@@ -25,8 +25,49 @@ shown in the Sunnylink website and the +/- buttons can be misleading.
 A frontend PR to `sunnypilot/sunnylink-frontend` is required for reliable
 three-decimal display and button control.
 
+## On-device torque tuning card (comma 4)
+
+sunnypilot's comma 4 (mici) settings screen has no steering settings, so the
+publisher adds a **torque** card right after **models**. It mirrors the Torque
+Settings section of Sunnylink's Steering page:
+
+| Card | Param | Editable |
+|---|---|---|
+| enforce torque control | `EnforceTorqueControl` | offroad; disabled while NNLC is on |
+| custom tuning | `CustomTorqueParams` | offroad |
+| real-time tuning | `TorqueParamsOverrideEnabled` | offroad |
+| lat accel factor (0.1 – 5.0) | `TorqueParamsOverrideLatAccelFactor` | offroad, or onroad with real-time tuning |
+| friction (0.0 – 1.0) | `TorqueParamsOverrideFriction` | offroad, or onroad with real-time tuning |
+| self-tune / relaxed self-tune | `LiveTorqueParamsToggle` / `LiveTorqueParamsRelaxedToggle` | offroad |
+| lateral jerk controller | `LateralJerkTorqueController` | offroad; disabled while NNLC is on |
+| tune version (default / v1.0 / v0.0) | `TorqueControlTune` | offroad |
+
+As on Sunnylink, everything after *enforce torque control* is hidden until it
+is on, and the values are hidden until *custom tuning* is on. Long-press any
+card for its description.
+
+Tapping *lat accel factor* or *friction* opens a picker: tap **-** / **+** to
+step once, or hold to repeat. The left chip cycles the step between
+`0.001`, `0.01` and `0.1`. The right chip shows the car's own value from opendbc
+(EV6: LAF `3.200`, friction `0.005`); tap it to go back to it. Each change is
+saved right away. The card's subtitle says whether the value applies **live**
+(real-time tuning on) or on the **next drive**.
+
+Before you turn on *custom tuning*, check both values. Until set, they are
+sunnypilot's defaults (LAF `2.5`, friction `0.1`), not the EV6's values.
+
+The card is installed by `ev6/patch_torque_card.py` from
+`ev6/mici/torque_tuning.py`. That adds one new file
+(`openpilot/selfdrive/ui/sunnypilot/mici/layouts/torque_tuning.py`) and one
+guarded block in `openpilot/selfdrive/ui/sunnypilot/mici/layouts/settings.py`.
+If the card fails to load, the settings screen still opens without it.
+Before writing anything, the patcher checks that every upstream module, class,
+param and icon the card uses still exists. If upstream renames any of them,
+the build stops instead of publishing a broken UI.
+
 The branch additionally includes `.ev6-build.json` for auditing provenance,
-recording both steering limits and the Sunnylink step override.
+recording the steering limits, the Sunnylink step override, the torque card,
+and a hash of this fork's patch set.
 The binary `panda/board/obj/panda_h7.bin.signed` is **rebuilt every time** from
 the exact matching source commit. It is **not** the old 384/4/7 firmware.
 
@@ -71,16 +112,18 @@ commit is unchanged, it exits. If changed, the workflow:
    If upstream changes them or the file structure, **stop**; do not guess.
 4. Applies `384/3/7` to the two source files and compiles H7 Panda firmware
    from the modified safety definition with the pinned toolchain source.
-5. Applies exactly those two steering edits and the two guarded Sunnylink
-   schema edits (YAML and compiled JSON) to the official staging prebuilt;
-   replaces its `panda_h7.bin.signed` firmware artifact.
+5. Applies exactly those two steering edits, the two guarded Sunnylink
+   schema edits (YAML and compiled JSON) and the guarded torque card to the
+   official staging prebuilt; replaces its `panda_h7.bin.signed` firmware
+   artifact.
 6. Confirms the two edited steering files match the source files byte-for-byte;
-   audits the five expected release-tree differences; publishes an orphan
-   `ev6-staging` snapshot in your own repo.
+   audits the six expected modified files and the one expected new file;
+   publishes an orphan `ev6-staging` snapshot in your own repo.
 
-A change to the Sunnylink precision patch triggers a rebuild even if official
-staging is unchanged. Changes on `master` to the automation scripts or
-workflow trigger an immediate run, in addition to the scheduled checks.
+Any change to `ev6/` or this workflow on `master` triggers a rebuild, even if
+official staging is unchanged: the published build records a hash of both,
+and a different hash means a new build. Such a push also starts a run
+immediately, in addition to the scheduled checks.
 
 If any step fails (including package incompatibility, changed upstream
 structures, compilation, or lack of GitHub write permissions), the existing
