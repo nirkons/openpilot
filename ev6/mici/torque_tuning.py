@@ -166,7 +166,8 @@ class TorqueValuePicker(BigDialogBase):
     milli = max(self._min, min(self._max, milli))
     if milli != self._milli:
       self._milli = milli
-      ui_state.params.put(self._key, milli / 1000)
+      # block: the card re-reads it right away, and a queued write isn't on disk yet
+      ui_state.params.put(self._key, milli / 1000, block=True)
       self._change_callback()
 
   def _nudge(self, direction: int):
@@ -290,7 +291,7 @@ class TorqueTuningLayoutMici(NavScroller):
     if version is None:
       ui_state.params.remove(TUNE_VERSION)
     else:
-      ui_state.params.put(TUNE_VERSION, version)
+      ui_state.params.put(TUNE_VERSION, version, block=True)
 
   def _refresh(self):
     params = ui_state.params

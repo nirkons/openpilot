@@ -21,6 +21,9 @@ class FakeParams:
     def __init__(self, allowed, values=None):
         self.allowed = allowed
         self.values = dict(values or {})
+        # Like the real Params, a write without block=True is only queued, and reads
+        # don't see it yet. Here it never lands, so every write must block.
+        self.queued = {}
 
     def _check(self, key):
         assert key in self.allowed, f"{key} is not in PARAM_KEYS"
@@ -33,12 +36,12 @@ class FakeParams:
         self._check(key)
         return self.values.get(key, DEFAULTS.get(key) if return_default else None)
 
-    def put(self, key, value):
+    def put(self, key, dat, block=False):
         self._check(key)
-        self.values[key] = value
+        (self.values if block else self.queued)[key] = dat
 
-    def put_bool(self, key, value, block=False):
-        self.put(key, value)
+    def put_bool(self, key, val, block=False):
+        self.put(key, val, block)
 
     def remove(self, key):
         self._check(key)
@@ -228,6 +231,7 @@ class TorqueTuningCardTests(unittest.TestCase):
         gui_app.pushed.clear()
         ui_state.CP = ev6_cp()
         self.params = ui_state.params = FakeParams(self.card.PARAM_KEYS)
+        self.addCleanup(lambda: self.assertEqual(self.params.queued, {}, "a write didn't block"))
 
     def open_panel(self, **values):
         self.params.values.update(values)
