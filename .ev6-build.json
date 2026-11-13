@@ -1,0 +1,15 @@
+{
+  "upstream": "sunnypilot/sunnypilot",
+  "upstream_staging_sha": "01e3e349d8a4522d7f5efa5d79140b1801b0405b",
+  "upstream_source_sha": "64f2381c2ea1e4d63ae4468a10a3672fb6680c72",
+  "ev6_patch_hash": "e9225d9df5a2c48682b657dbd6480b4ecbd858464ce4d1b8ae56add9c245204d",
+  "steering_limits": {
+    "max": 384,
+    "up": 3,
+    "down": 7
+  },
+  "sunnylink_lat_accel_step": 0.001,
+  "mici_torque_card": true,
+  "panda_h7_sha256": "57f9e814be6b5c8e209462a07a6b5d35f4d133e51ee24bfcc06390213a8abac1",
+  "generated_at_utc": "2026-11-13T20:54:40.379772+00:00"
+}
